@@ -7,8 +7,42 @@ import { CodeBuddyIntlExecutor } from "../../open-sse/executors/codebuddy-intl.j
 import { CodeBuddyExecutor } from "../../open-sse/executors/codebuddy-cn.js";
 import { scrubCodeBuddyText } from "../../open-sse/config/codebuddyFingerprints.js";
 
-const exec = new CodeBuddyIntlExecutor();
+const JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1aWQtMTIzIn0.sig";
+
+describe("codebuddy channel header family (channel verification)", () => {
+  const intl = new CodeBuddyIntlExecutor();
+
+  it("adds the conversation/request family + trace family with consistent ids", () => {
+    const h = intl.buildHeaders({ accessToken: JWT }, true);
+    expect(h["X-Conversation-ID"]).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
+    const isHex = (v) => /^[0-9a-f]{32}$/.test(v);
+    expect(isHex(h["X-Conversation-Request-ID"])).toBe(true);
+    expect(h["X-Root-Request-ID"]).toBe(h["X-Conversation-Request-ID"]);
+    expect(h["X-Conversation-Message-ID"]).toBe(h["X-Request-ID"]);
+    expect(h["X-Agent-Intent"]).toBe("craft");
+    expect(h["X-Agent-Runtime"]).toBe("local-agent");
+    expect(h["X-Trace-ID"]).toBe(h["traceparent"].split("-")[1]);
+    expect(h["traceparent"]).toMatch(/^00-[0-9a-f]-{0,0}/);
+    expect(h["b3"]).toBe(`${h["X-Trace-ID"]}-${h["X-B3-SpanId"]}-1`);
+    expect(h["X-B3-Sampled"]).toBe("1");
+  });
+
+  it("derives X-User-Id from the OAuth token sub claim", () => {
+    const h = intl.buildHeaders({ accessToken: JWT }, true);
+    expect(h["X-User-Id"]).toBe("uid-123");
+  });
+
+  it("omits X-User-Id for plain API-key credentials", () => {
+    const h = intl.buildHeaders({ apiKey: "cbk-test" }, true);
+    expect(h["X-User-Id"]).toBeUndefined();
+    expect(h["X-Conversation-ID"]).toBeDefined();
+  });
+});
+
 const cn = new CodeBuddyExecutor();
+const exec = new CodeBuddyIntlExecutor();
 
 const encode = (out) => JSON.stringify(out);
 

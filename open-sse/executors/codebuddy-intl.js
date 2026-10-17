@@ -4,6 +4,7 @@ import {
   CODEBUDDY_NEUTRAL_PROMPT,
   scrubCodeBuddyText,
 } from "../config/codebuddyFingerprints.js";
+import { codeBuddyChannelHeaders } from "../config/codebuddyIdentity.js";
 
 /**
  * CodeBuddyIntlExecutor — talks to https://www.codebuddy.ai/v2/chat/completions
@@ -16,6 +17,15 @@ import {
 export class CodeBuddyIntlExecutor extends DefaultExecutor {
   constructor() {
     super("codebuddy-intl");
+  }
+
+  // Channel verification requires the official client's conversation/request
+  // header family on every chat call (see config/codebuddyIdentity.js).
+  buildHeaders(credentials, stream) {
+    return {
+      ...super.buildHeaders(credentials, stream),
+      ...codeBuddyChannelHeaders(credentials),
+    };
   }
 
   transformRequest(model, body, stream, credentials) {

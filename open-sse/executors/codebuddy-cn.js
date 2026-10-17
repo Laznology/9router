@@ -4,6 +4,7 @@ import {
   CODEBUDDY_NEUTRAL_PROMPT,
   scrubCodeBuddyText,
 } from "../config/codebuddyFingerprints.js";
+import { codeBuddyChannelHeaders } from "../config/codebuddyIdentity.js";
 
 /**
  * CodeBuddyExecutor — talks to https://copilot.tencent.com/v2/chat/completions
@@ -17,6 +18,15 @@ import {
 export class CodeBuddyExecutor extends DefaultExecutor {
   constructor() {
     super("codebuddy-cn");
+  }
+
+  // Same-family gateway: the intl conversation/request header family also
+  // satisfies the CN channel check (official CLI sends it on both sides).
+  buildHeaders(credentials, stream) {
+    return {
+      ...super.buildHeaders(credentials, stream),
+      ...codeBuddyChannelHeaders(credentials),
+    };
   }
 
   transformRequest(model, body, stream, credentials) {
