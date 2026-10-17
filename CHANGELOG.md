@@ -1,3 +1,8 @@
+# v0.5.107 (2026-10-17)
+
+## Features
+- **CodeBuddy**: satisfy the gateway's channel verification with the official client's conversation/request header family — the intl edge now rejects every chat call without it (bare requests verified 400 code 11128 "request illegal", family-carrying requests pass the channel check). Per call: hyphenated UUIDv7 `X-Conversation-ID`, per-turn `X-Conversation-Request-ID` = `X-Root-Request-ID`, per-call `X-Conversation-Message-ID` = `X-Request-ID` (32-hex UUIDv7), `X-Agent-Intent: craft`, `X-Agent-Runtime: local-agent`, trace family (`X-Trace-ID` + `traceparent` + `b3`/`X-B3-*`), and `X-User-Id` derived from the OAuth token's `sub` claim when present. Both `codebuddy-cn` and `codebuddy-intl` send it; registry fingerprints bumped to the current official CLI identity `IDE|CLI/2.168.2 CodeBuddy/2.168.2`
+
 # v0.5.106 (2026-10-17)
 
 ## Fixes
