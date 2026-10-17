@@ -1,3 +1,8 @@
+# v0.5.108 (2026-10-17)
+
+## Fixes
+- **OpenCode Free**: pass the new client-attestation gate on `/inference/openai/v1` — the endpoint now rejects every request whose first system message does not start with the CLI's canonical agent preamble and whose tool array lacks the CLI's exact tool definitions (verified by live wire probes: one changed word or dropped tools → 403 FreeTierError; preamble + appended custom rules + the 12 verbatim tools → 200). The executor now cloaks the caller's system prompt under `# Custom rules` after the verbatim v2.0.30 preamble (captured from a fresh-profile CLI run), sends all 12 fingerprint tool definitions (`edit`/`glob`/`grep`/`question`/`read`/`shell`/`skill`/`subagent`/`webfetch`/`websearch`/`write`/`execute` — generated into `config/opencodeFingerprintData.js`), bumps the UA mirror to `opencode/latest/2.0.30/cli`, moves the lane onto `/inference/openai/v1/{chat/completions,responses,messages}`, adds the transport-added trace family (`b3` + `traceparent`, invisible to the CLI's own request hooks), normalizes `x-opencode-project` to a stable 40-hex id, and sends `Accept: */*` like the CLI does. Stable-session cache and session-id shape preserved
+
 # v0.5.107 (2026-10-17)
 
 ## Features

@@ -16,6 +16,10 @@ import {
   stableSessionId,
 } from "../../open-sse/executors/opencode.js";
 import {
+  OPENCODE_AGENT_SYSTEM,
+  OPENCODE_FINGERPRINT_TOOLS,
+} from "../../open-sse/utils/opencodeFingerprint.js";
+import {
   generateSessionId as generateZenSessionId,
   translateSessionId as translateZenSessionId,
 } from "../../open-sse/executors/opencode-zen.js";
@@ -177,22 +181,58 @@ describe("OpenCode Free Executor Session Resolution", () => {
     expect(() => executor.transformRequest("muse-spark-1.3-contributor-free", null, false, {})).not.toThrow();
     expect(() => executor.transformRequest("big-pickle", undefined, false, {})).not.toThrow();
   });
+
+  it("cloaks the first system message with the canonical preamble (free-tier gate)", () => {
+    const executor = getExecutor("opencode");
+    const body = {
+      messages: [
+        { role: "system", content: "Answer in Indonesian." },
+        { role: "user", content: "halo" },
+      ],
+    };
+    const out = executor.transformRequest("big-pickle", body, true, {});
+    expect(out.messages[0].role).toBe("system");
+    expect(out.messages[0].content.startsWith(OPENCODE_AGENT_SYSTEM)).toBe(true);
+    expect(out.messages[0].content).toContain("# Custom rules\nAnswer in Indonesian.");
+    // Fingerprint tools must ride along with the preamble, or upstream answers
+    // 403 FreeTierError even though the preamble is correct.
+    const names = out.tools.map((tool) => tool.function?.name ?? tool.name);
+    for (const name of OPENCODE_FINGERPRINT_TOOLS) expect(names).toContain(name);
+    expect(out.messages[1].content).toBe("halo");
+
+    // Idempotent: cloak/applyFingerprint on an already-cloaked body is a no-op
+    // for the preamble.
+    const again = executor.transformRequest("big-pickle", out, true, {});
+    expect(again.messages[0].content).toBe(out.messages[0].content);
+  });
+
+  it("cloaks bodies without a system message by prepending the preamble", () => {
+    const executor = getExecutor("opencode");
+    const out = executor.transformRequest(
+      "big-pickle",
+      { messages: [{ role: "user", content: "hi" }] },
+      true,
+      {},
+    );
+    expect(out.messages[0]).toEqual({ role: "system", content: expect.stringContaining(OPENCODE_AGENT_SYSTEM) });
+    expect(out.messages[1].role).toBe("user");
+  });
 });
 
 describe("OpenCode Free User-Agent Validation", () => {
   it("defaults User-Agent to the v2 CLI form for non-opencode downstream clients", () => {
     const executor = getExecutor("opencode");
     const headersNoUa = executor.buildHeaders({});
-    expect(headersNoUa["User-Agent"]).toBe("opencode/latest/2.0.26/cli");
+    expect(headersNoUa["User-Agent"]).toBe("opencode/latest/2.0.30/cli");
 
     const headersClaude = executor.buildHeaders({ rawHeaders: { "user-agent": "Claude-Code/1.0" } });
-    expect(headersClaude["User-Agent"]).toBe("opencode/latest/2.0.26/cli");
+    expect(headersClaude["User-Agent"]).toBe("opencode/latest/2.0.30/cli");
   });
 
   it("replaces v1-style opencode User-Agents, which upstream now rejects with 403", () => {
     const executor = getExecutor("opencode");
     for (const ua of ["opencode", "opencode/1.15.0", "opencode/1.18.31 ai-sdk/provider-utils/4.0.40 runtime/bun/1.3.14"]) {
-      expect(executor.buildHeaders({ rawHeaders: { "user-agent": ua } })["User-Agent"]).toBe("opencode/latest/2.0.26/cli");
+      expect(executor.buildHeaders({ rawHeaders: { "user-agent": ua } })["User-Agent"]).toBe("opencode/latest/2.0.30/cli");
     }
   });
 
@@ -279,7 +319,7 @@ describe("OpenCode Stable Session Reuse (429 follow-up)", () => {
     expect(chatNoTools.stream).toBe(true);
     // tool_choice "none" is answered with 403 FreeTierError upstream.
     expect(chatNoTools.tool_choice).toBeUndefined();
-    expect(chatNoTools.tools.map((t) => t.function?.name)).toEqual(["read", "shell"]);
+    expect(chatNoTools.tools.map((t) => t.function?.name)).toEqual(OPENCODE_FINGERPRINT_TOOLS);
     expect(chatNoTools.messages[0].role).toBe("system");
 
     const chatWithTools = executor.transformRequest("nemotron-3-ultra-free", {
@@ -291,13 +331,13 @@ describe("OpenCode Stable Session Reuse (429 follow-up)", () => {
       tool_choice: "auto",
     });
     expect(chatWithTools.tool_choice).toBe("auto");
-    expect(chatWithTools.tools.map((t) => t.function?.name)).toEqual(["Bash", "Read", "read", "shell"]);
+    expect(chatWithTools.tools.map((t) => t.function?.name)).toEqual(["Bash", "Read", ...OPENCODE_FINGERPRINT_TOOLS]);
 
     const chatClash = executor.transformRequest("nemotron-3-ultra-free", {
       messages: [{ role: "user", content: "hi" }],
       tools: [{ type: "function", function: { name: "read", description: "existing" } }],
     });
-    expect(chatClash.tools.map((t) => t.function?.name)).toEqual(["read_client", "read", "shell"]);
+    expect(chatClash.tools.map((t) => t.function?.name)).toEqual(["read_client", ...OPENCODE_FINGERPRINT_TOOLS]);
     expect(chatClash.tools[0].function.description).toBe("existing");
   });
 
@@ -317,8 +357,9 @@ describe("OpenCode Stable Session Reuse (429 follow-up)", () => {
 
     expect(transformed.stream).toBe(true);
     expect(transformed.reasoning?.effort).toBe("xhigh");
-    expect(transformed.tools.map((tool) => tool.name)).toEqual(["zcode_search", "read", "shell"]);
-    expect(transformed.instructions).toMatch(/Do not call the `read` or `shell` tools/);
+    expect(transformed.tools.map((tool) => tool.name)).toEqual(["zcode_search", ...OPENCODE_FINGERPRINT_TOOLS]);
+    expect(transformed.instructions).toContain("Do not call the `edit` or `glob`");
+    expect(transformed.instructions).toContain("`execute` tools; they are placeholders");
   });
 
   it("declares forceStream on the opencode transport so chatCore serves SSE upstream", async () => {

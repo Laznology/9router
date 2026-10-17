@@ -1,12 +1,14 @@
 import { describe, it, expect } from "vitest";
 import {
   applyFingerprintTools,
+  cloakOpencodeSystem,
   concealFingerprintToolNames,
   appendMissingFingerprintTools,
   fingerprintToolKey,
   restoreToolNames,
   takeRenamedToolNames,
   OPENCODE_FINGERPRINT_TOOLS,
+  OPENCODE_AGENT_SYSTEM,
 } from "open-sse/utils/opencodeFingerprint.js";
 
 const CC_TOOLS = ["Task", "Bash", "Glob", "Grep", "Read", "Edit", "Write", "WebFetch"];
@@ -15,7 +17,7 @@ const chat = (names) => names.map((name) => ({ type: "function", function: { nam
 const namesOf = (tools) => tools.map((tool) => tool.name ?? tool.function?.name);
 
 describe("opencodeFingerprint — request side", () => {
-  it("appends exact read/shell definitions and leaves case variants untouched", () => {
+  it("appends the verbatim CLI tool definitions and leaves case variants untouched", () => {
     const body = { tools: flat(CC_TOOLS) };
     const map = applyFingerprintTools(body, true);
 
@@ -31,7 +33,7 @@ describe("opencodeFingerprint — request side", () => {
     const body = { tools: chat(["Edit"]) };
     applyFingerprintTools(body, false);
 
-    expect(namesOf(body.tools)).toEqual(["Edit", "read", "shell"]);
+    expect(namesOf(body.tools)).toEqual(["Edit", ...OPENCODE_FINGERPRINT_TOOLS]);
     const read = body.tools.find((tool) => tool.function?.name === "read");
     expect(read.function.parameters.required).toEqual(["path"]);
   });
@@ -40,7 +42,7 @@ describe("opencodeFingerprint — request side", () => {
     const body = { tools: flat(["read", "read_client", "Edit"]) };
     const map = applyFingerprintTools(body, true);
 
-    expect(namesOf(body.tools)).toEqual(["read_client2", "read_client", "Edit", "read", "shell"]);
+    expect(namesOf(body.tools)).toEqual(["read_client2", "read_client", "Edit", ...OPENCODE_FINGERPRINT_TOOLS]);
     expect(map.get("read_client2")).toBe("read");
   });
 
@@ -59,7 +61,7 @@ describe("opencodeFingerprint — request side", () => {
   it("drops duplicate declarations of one fingerprint name", () => {
     const body = { tools: flat(["shell", "shell"]) };
     applyFingerprintTools(body, true);
-    expect(namesOf(body.tools)).toEqual(["shell_client", "read", "shell"]);
+    expect(namesOf(body.tools)).toEqual(["shell_client", ...OPENCODE_FINGERPRINT_TOOLS]);
   });
 
   it("defaults Responses tool_choice to auto and never to none for chat", () => {
@@ -74,18 +76,20 @@ describe("opencodeFingerprint — request side", () => {
   });
 
   it("tells the model the appended tools are placeholders", () => {
+    const [firstFp, secondFp] = OPENCODE_FINGERPRINT_TOOLS;
+    const noteStart = new RegExp(`^Do not call the \\\`${firstFp}\\\` or \\\`${secondFp}\\\``);
     const responses = { instructions: "Be brief.", tools: [] };
     applyFingerprintTools(responses, true);
-    expect(responses.instructions).toMatch(/^Be brief\.\n\nDo not call the `read` or `shell` tools;/);
+    expect(responses.instructions).toMatch(new RegExp(`^Be brief\\.\\n\\nDo not call the \\\`${firstFp}\\\` or \\\`${secondFp}\\\``));
 
     const chatBody = { messages: [{ role: "system", content: "Be brief." }, { role: "user", content: "hi" }] };
     applyFingerprintTools(chatBody, false);
     expect(chatBody.messages).toHaveLength(2);
-    expect(chatBody.messages[0].content).toMatch(/^Be brief\.\n\nDo not call the `read` or `shell` tools;/);
+    expect(chatBody.messages[0].content).toMatch(new RegExp(`^Be brief\\.\\n\\nDo not call the \\\`${firstFp}\\\` or \\\`${secondFp}\\\``));
 
     const noSystem = { messages: [{ role: "user", content: "hi" }] };
     applyFingerprintTools(noSystem, false);
-    expect(noSystem.messages[0]).toEqual({ role: "system", content: expect.stringMatching(/^Do not call/) });
+    expect(noSystem.messages[0]).toEqual({ role: "system", content: expect.stringMatching(noteStart) });
 
     const claudeShape = { system: "Be brief.", messages: [{ role: "user", content: "hi" }] };
     applyFingerprintTools(claudeShape, false);
@@ -117,6 +121,50 @@ describe("opencodeFingerprint — request side", () => {
     for (const tools of [null, undefined, "nope", [null, 42, []], [{}, { name: "" }]]) {
       expect(() => concealFingerprintToolNames(tools)).not.toThrow();
       expect(() => appendMissingFingerprintTools(tools, true)).not.toThrow();
+    }
+  });
+});
+
+describe("opencodeFingerprint — system-cloak", () => {
+  it("prepends the canonical preamble to an existing system message", () => {
+    const body = {
+      messages: [
+        { role: "system", content: "Answer in Indonesian." },
+        { role: "user", content: "halo" },
+      ],
+    };
+    cloakOpencodeSystem(body);
+
+    expect(body.messages[0].content.startsWith(OPENCODE_AGENT_SYSTEM)).toBe(true);
+    expect(body.messages[0].content).toContain("# Custom rules\nAnswer in Indonesian.");
+    expect(body.messages[1].content).toBe("halo");
+  });
+
+  it("is idempotent: a cloaked message is left untouched", () => {
+    const body = { messages: [{ role: "system", content: OPENCODE_AGENT_SYSTEM + "# extra" }] };
+    cloakOpencodeSystem(body);
+    expect(body.messages[0].content).toBe(OPENCODE_AGENT_SYSTEM + "# extra");
+  });
+
+  it("prepends a plain preamble when no system message leads", () => {
+    const body = { messages: [{ role: "user", content: "hi" }] };
+    cloakOpencodeSystem(body);
+    expect(body.messages[0]).toEqual({ role: "system", content: OPENCODE_AGENT_SYSTEM });
+    expect(body.messages[1].role).toBe("user");
+  });
+
+  it("prepends the preamble part to a multi-part system message", () => {
+    const body = {
+      messages: [{ role: "system", content: [{ type: "text", text: "Be terse." }] }, { role: "user", content: "hi" }],
+    };
+    cloakOpencodeSystem(body);
+    expect(body.messages[0].content[0]).toEqual({ type: "text", text: expect.stringContaining(OPENCODE_AGENT_SYSTEM) });
+    expect(body.messages[0].content[1]).toEqual({ type: "text", text: "Be terse." });
+  });
+
+  it("never throws on malformed bodies", () => {
+    for (const body of [null, undefined, {}, { messages: [] }, { messages: [42] }, { messages: [{ role: "system", content: 7 }] }]) {
+      expect(() => cloakOpencodeSystem(body)).not.toThrow();
     }
   });
 });

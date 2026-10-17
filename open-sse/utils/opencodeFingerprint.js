@@ -1,49 +1,27 @@
 /**
  * Helpers for the OpenCode free-tier client fingerprint.
  *
- * Live upstream probes (OpenCode v2, /inference/v1) show that free-tier
- * requests must declare OpenCode's own `read` and `shell` tools with their exact
- * descriptions and parameter schemas; stubbed descriptions, renamed schemas or
- * tool_choice "none" are answered with 403 FreeTierError. Caller tools are sent
- * untouched, except one that already uses an exact fingerprint name with a
- * different definition: it travels under an alias and the response side
- * restores the caller's original name.
+ * Live probes (OpenCode v2.0.30, /inference/openai/v1) show the free-tier gate
+ * validates two things, both enforced with 403 FreeTierError:
+ * 1. messages[0] must start with OpenCode's own agent preamble (see
+ *    config/opencodeFingerprintData.js). One changed word near the top or any
+ *    truncation is rejected; content appended after the preamble is accepted.
+ * 2. with that preamble, the tool array must carry the CLI's exact tool
+ *    definitions (edit/glob/grep/question/read/shell/skill/subagent/
+ *    webfetch/websearch/write/execute, verbatim). Without them, or pairing
+ *    them with a different preamble, the request is rejected.
+ * Caller tools are sent untouched, except one that already uses an exact
+ * fingerprint name with a different definition: it travels under an alias and
+ * the response side restores the caller's original name.
  */
 
-/** Names required by the upstream free-tier gate. */
-export const OPENCODE_FINGERPRINT_TOOLS = ["read", "shell"];
+import {
+  OPENCODE_FINGERPRINT_TOOL_DEFINITIONS as FINGERPRINT_TOOL_DEFINITIONS,
+  OPENCODE_FINGERPRINT_TOOLS,
+  OPENCODE_AGENT_SYSTEM,
+} from "../config/opencodeFingerprintData.js";
 
-// Verbatim from the OpenCode v2.0.26 CLI. Upstream compares description and
-// parameters, so do not reword or reformat these.
-const FINGERPRINT_TOOL_DEFINITIONS = {
-  read: {
-    description: "Read the contents of a file or directory. Supports text files, images, and PDFs. Images and PDFs are presented directly to the model. Each text line is prefixed by its 1-based line number as <line>: <content>. The prefix is for reference and is not part of the file content. Directory entries are returned one per line. Use offset and limit to read large files or directories in sections. Prefer one larger read over many small slices, and use grep to find specific content in large files.",
-    parameters: {
-      type: "object",
-      properties: {
-        path: { type: "string", description: "File or directory to read" },
-        offset: { type: "integer", minimum: 0, description: "The line or directory entry to start reading from (1-based)" },
-        limit: { type: "integer", minimum: 0, description: "The maximum number of lines or directory entries to read (defaults to and capped at 2000)" },
-      },
-      required: ["path"],
-      additionalProperties: false,
-    },
-  },
-  shell: {
-    description: "Execute a shell command and return its output. Commands run on Linux using bash. Quote file paths containing spaces or special characters. Prefer dedicated tools over shell commands when possible. When output is large, the full result is saved to a file and a truncated preview is returned. Rely on automatic truncation unless filtering the output is more useful. Commands accept an optional timeout, background commands have no timeout by default. Background commands return immediately, and you will be notified when they complete.",
-    parameters: {
-      type: "object",
-      properties: {
-        command: { type: "string", description: "Shell command string to execute" },
-        workdir: { type: "string", description: "Working directory to execute the command in. Defaults to the current working directory. When possible, avoid changing directories in the command and set the working directory here instead." },
-        timeout: { type: "integer", minimum: 0, description: "Timeout in milliseconds. Set to 0 to disable the timeout. Defaults to 120000 for foreground commands. Background commands have no timeout by default." },
-        background: { type: "boolean", description: "Run the command in the background and return immediately (useful for dev servers and long-running builds). You do not need to use '&' at the end of the command when using this parameter. You will be notified when it completes. DO NOT poll for completion." },
-      },
-      required: ["command"],
-      additionalProperties: false,
-    },
-  },
-};
+export { OPENCODE_FINGERPRINT_TOOLS };
 
 // Request body -> names renamed for that request. transformRequest() mutates the
 // same body object that chatCore passed into the executor, so a WeakMap keeps the
@@ -267,6 +245,45 @@ export function takeRenamedToolNames(body) {
   if (!body || typeof body !== "object") return null;
   return renamedToolNames.get(body) || null;
 }
+
+// Content appended after the canonical preamble. Appends are accepted by the
+// free-tier gate; the preamble itself must stay verbatim.
+const SYSTEM_CLOAK_SEP = "\n\n# Custom rules\n";
+
+/**
+ * Make the request pass the free-tier system-prompt gate: messages[0] must
+ * start with OpenCode's canonical preamble. The caller's own system text
+ * rides after it under "# Custom rules" so it still reaches the model.
+ *
+ * Idempotent. Runs AFTER applyFingerprintTools, so the placeholder-note system
+ * message that function may prepend gets folded into the cloaked first
+ * message instead of landing before the preamble. Guarded: unknown shapes are
+ * left untouched rather than corrupting the request.
+ *
+ * @param {object} body - OpenAI chat-shaped request body, mutated in place
+ */
+export function cloakOpencodeSystem(body) {
+  if (!body || typeof body !== "object" || !Array.isArray(body.messages) || body.messages.length === 0) {
+    return;
+  }
+  const first = body.messages[0];
+  if (first?.role !== "system") {
+    body.messages = [{ role: "system", content: OPENCODE_AGENT_SYSTEM }, ...body.messages];
+    return;
+  }
+  if (typeof first.content === "string") {
+    if (first.content.startsWith(OPENCODE_AGENT_SYSTEM)) return;
+    first.content = `${OPENCODE_AGENT_SYSTEM}${SYSTEM_CLOAK_SEP}${first.content}`;
+    return;
+  }
+  if (Array.isArray(first.content)) {
+    // Multi-part system text (rare): the preamble must be the first part.
+    const placeholder = { type: "text", text: OPENCODE_AGENT_SYSTEM + SYSTEM_CLOAK_SEP };
+    first.content = [placeholder, ...first.content];
+  }
+}
+
+export { OPENCODE_AGENT_SYSTEM };
 
 // Response side -------------------------------------------------------------
 

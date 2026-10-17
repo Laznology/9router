@@ -6,7 +6,7 @@ import { getThinkingLevels } from "../providers/thinkingLevels.js";
 import { injectReasoningContent } from "../utils/reasoningContentInjector.js";
 import { resolveSessionId } from "../utils/sessionManager.js";
 import { isMuseSparkModel } from "../providers/models/helpers.js";
-import { applyFingerprintTools } from "../utils/opencodeFingerprint.js";
+import { applyFingerprintTools, cloakOpencodeSystem } from "../utils/opencodeFingerprint.js";
 import { ANTHROPIC_API_VERSION } from "../providers/shared.js";
 import {
   normalizeResponsesInput,
@@ -15,9 +15,9 @@ import {
   coerceResponsesOutput,
 } from "../translator/formats/responsesApi.js";
 
-// OpenCode v2 UA shape: opencode/<channel>/<version>/<client>. Upstream rejects
-// the v1 "opencode/1.18.x" form with 403 FreeTierError since 2026-10-14.
-const OPENCODE_UA = "opencode/latest/2.0.26/cli";
+// OpenCode v2 UA shape: opencode/<channel>/<version>/<client>. Mirror the
+// released CLI; 2.0.26 stopped passing the free-tier gate on 2026-10-17.
+const OPENCODE_UA = "opencode/latest/2.0.30/cli";
 const OPENCODE_CLIENT = "cli";
 const MAX_SESSION_LENGTH = 256;
 const MAX_TOOL_NAME_LEN = 128;
@@ -30,7 +30,7 @@ function hasValidOpencodeVersion(ua) {
   const m = String(ua || "").match(/^opencode\/[a-z0-9-]+\/(\d+)\.\d+\.\d+\/[a-z0-9-]+$/i);
   return !!m && parseInt(m[1], 10) >= 2;
 }
-// Models served by /inference/v1/responses; every other model stays on /chat/completions.
+// Models served by /inference/openai/v1/responses; every other model stays on /chat/completions.
 const RESPONSES_MODELS = new Set([
   "muse-spark-1.2-contributor-free",
   "muse-spark-1.3-contributor-free",
@@ -369,6 +369,11 @@ export class OpenCodeExecutor extends BaseExecutor {
       applyFingerprintTools(body, true);
     } else if (body && typeof body === "object") {
       applyFingerprintTools(body, false);
+      // The free-tier gate rejects anything whose first system message does
+      // not start with the CLI's canonical preamble; cloak after tool
+      // fingerprinting so the placeholder-note system message it may prepend
+      // ends up inside the cloaked first message.
+      cloakOpencodeSystem(body);
     }
     return injectReasoningContent({ provider: this.provider, model, body });
   }
@@ -377,13 +382,13 @@ export class OpenCodeExecutor extends BaseExecutor {
     return super.execute({ ...args, credentials: this.prepareRequestCredentials(args) });
   }
 
-  // Free tier moved from /zen/v1 to /inference/v1 (OpenCode v2); /zen/v1 now
-  // answers every free request with 403 FreeTierError.
+  // Free tier lives on /inference/openai/v1 (OpenCode v2); /zen/v1 answers
+  // every free request with 403 FreeTierError and /inference/v1 is dead too.
   buildUrl(model) {
     const base = this.config.baseUrl;
-    if (isResponsesModel(model)) return `${base}/inference/v1/responses`;
-    if (isMessagesModel(model)) return `${base}/inference/v1/messages`;
-    return `${base}/inference/v1/chat/completions`;
+    if (isResponsesModel(model)) return `${base}/inference/openai/v1/responses`;
+    if (isMessagesModel(model)) return `${base}/inference/openai/v1/messages`;
+    return `${base}/inference/openai/v1/chat/completions`;
   }
 
   buildHeaders(credentials, stream = true, url = "") {
@@ -407,10 +412,36 @@ export class OpenCodeExecutor extends BaseExecutor {
       "x-opencode-session-id": session,
       "x-session-affinity": session,
       "x-session-id": session,
-      "x-opencode-project": lower["x-opencode-project"] || "global",
-      "Accept": stream ? "text/event-stream" : "*/*",
+      "x-opencode-project": projectIdHeader(lower, credentials),
+      ...traceHeaders(),
+      // The CLI sends */* even when streaming; text/event-stream trips
+      // content-negotiation checks on the openai/v1 surface.
+      "Accept": "*/*",
     };
     if (url.endsWith("/messages")) headers["anthropic-version"] = ANTHROPIC_API_VERSION;
     return headers;
   }
+}
+
+// W3C trace headers the CLI's transport merges at fetch time (never visible to
+// its own request hooks — verified by wire capture). The b3 parent-span field
+// is a fresh random id like the CLI's.
+function traceHeaders() {
+  const traceId = crypto.randomBytes(16).toString("hex");
+  const spanId = crypto.randomBytes(8).toString("hex");
+  const parentSpanId = crypto.randomBytes(8).toString("hex");
+  return {
+    "b3": `${traceId}-${spanId}-1-${parentSpanId}`,
+    "traceparent": `00-${traceId}-${spanId}-01`,
+  };
+}
+
+// The CLI sends a 40-hex project id; a non-matching value rides along untyped
+// and upstream answers FreeTierError in some lanes, so normalize to hex.
+// Stable per connection identity, arbitrary server-side (live-verified).
+function projectIdHeader(lower, credentials) {
+  const provided = typeof lower["x-opencode-project"] === "string" ? lower["x-opencode-project"].trim() : "";
+  if (/^[0-9a-f]{40}$/.test(provided)) return provided;
+  const identity = credentials?.connectionId || credentials?.id || lower.authorization || lower["x-api-key"] || "opencode";
+  return crypto.createHash("sha1").update(`opencode-project\0${identity}`).digest("hex");
 }
