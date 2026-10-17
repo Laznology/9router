@@ -1,4 +1,9 @@
 import { DefaultExecutor } from "./default.js";
+import {
+  CODEBUDDY_AGENT_PATTERN,
+  CODEBUDDY_NEUTRAL_PROMPT,
+  scrubCodeBuddyText,
+} from "../config/codebuddyFingerprints.js";
 
 /**
  * CodeBuddyExecutor — talks to https://copilot.tencent.com/v2/chat/completions
@@ -18,30 +23,57 @@ export class CodeBuddyExecutor extends DefaultExecutor {
     const transformed = super.transformRequest(model, body, stream, credentials);
     transformed.stream = true;
 
-    // Tencent's content filter flags CLI agent system prompts ("You are Claude
-    // Code, Anthropic's official CLI...") as prompt injection / sensitive content
-    // and rejects the whole request. Detect agent system prompts (length catch-all
-    // + identity-marker regex) and replace them with a neutral one, while leaving
-    // legitimate user system prompts untouched. content may be a string or typed
-    // blocks ([{type:"text",text}]) depending on the incoming client format, so
-    // flatten before matching and preserve the original shape on replacement.
-    const NEUTRAL_PROMPT = "You are a helpful AI assistant that helps with software engineering tasks.";
-    const AGENT_PATTERN = /you are claude code|claude.?code.+official.+cli|anthropic.+official.+cli|anxthxropic.+official.+cli|you are (?:cursor|windsurf|cline|aider|continue|copilot|cody)|you are an? (?:ai )?(?:coding |code )?agent|cc_entrypoint\s*=\s*(?:cli|vscode|jetbrains|gui)|claude.?code.+issues|give feedback.+claude.?code|you are .{0,30}(?:powerful )?ai agent|orchestration capabilities|OhMyOpenCode|<agent-identity>|<Role>|<Behavior_Instructions>/i;
-    const flatten = (content) =>
-      typeof content === "string"
-        ? content
-        : Array.isArray(content)
-          ? content.map((b) => (b && typeof b.text === "string" ? b.text : "")).join("\n")
-          : "";
+    // Tencent's channel/content filter flags agent identity patterns (long
+    // agent prompts, cross-agent fingerprints — see config/codebuddyFingerprints.js)
+    // and rejects the whole request (11101 content filter / 11128 channel
+    // verification). Screen agent system prompts (length catch-all + identity
+    // regex), neutralize measured fingerprints everywhere, and replace flagged
+    // system prompts while leaving legitimate user system prompts untouched.
+    // content may be a string or typed blocks ([{type:"text",text}]) depending
+    // on the incoming client format.
     if (Array.isArray(transformed.messages)) {
       transformed.messages = transformed.messages.map((message) => {
-        if (!message || message.role !== "system") return message;
-        const text = flatten(message.content);
-        if (!text) return message;
-        if (text.length > 2000 || AGENT_PATTERN.test(text)) {
-          return typeof message.content === "string"
-            ? { ...message, content: NEUTRAL_PROMPT }
-            : { ...message, content: [{ type: "text", text: NEUTRAL_PROMPT }] };
+        if (!message || typeof message !== "object") return message;
+        if (message.role !== "system") {
+          // Non-system texts: narrow measured-fingerprint scrub only — the
+          // catch-all swap exists to protect instructions, not user content.
+          if (typeof message.content === "string") {
+            return { ...message, content: scrubCodeBuddyText(message.content) };
+          }
+          if (Array.isArray(message.content)) {
+            return {
+              ...message,
+              content: message.content.map((block) =>
+                block && typeof block.text === "string"
+                  ? { ...block, text: scrubCodeBuddyText(block.text) }
+                  : block,
+              ),
+            };
+          }
+          return message;
+        }
+        if (typeof message.content === "string") {
+          const text = message.content;
+          if (text.length > 2000 || CODEBUDDY_AGENT_PATTERN.test(text)) {
+            return { ...message, content: CODEBUDDY_NEUTRAL_PROMPT };
+          }
+          return { ...message, content: scrubCodeBuddyText(text) };
+        }
+        if (Array.isArray(message.content)) {
+          const text = message.content
+            .map((block) => (block && typeof block.text === "string" ? block.text : ""))
+            .join("\n");
+          if (text.length > 2000 || CODEBUDDY_AGENT_PATTERN.test(text)) {
+            return { ...message, content: [{ type: "text", text: CODEBUDDY_NEUTRAL_PROMPT }] };
+          }
+          return {
+            ...message,
+            content: message.content.map((block) =>
+              block && typeof block.text === "string"
+                ? { ...block, text: scrubCodeBuddyText(block.text) }
+                : block,
+            ),
+          };
         }
         return message;
       });

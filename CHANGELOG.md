@@ -1,3 +1,8 @@
+# Unreleased
+
+## Fixes
+- **CodeBuddy**: dodge upstream channel verification (HTTP 400 code 11128 "Illegal API invocation from an unapproved channel") — the gateway rejects requests whose text carries another coding agent's identity fingerprint verbatim (Claude Code identity sentence, `Main branch (you will usually use this for PRs)`, `x-anthropic-billing-header`, `Sisyphus-Junior - Focused executor from OhMyOpenCode`). Triggers + rewrites verified by live A/B probes against the intl edge (2026-10-17); scrub now runs on every message text and tool-call argument in both `codebuddy-cn` and `codebuddy-intl`. `codebuddy-intl` additionally maps the OpenAI `developer` role onto `system` (upstream role whitelist rejects it with the same 11128) and injects its identity system prompt only when the request doesn't start with one, mirroring `codebuddy-cn`'s agent-prompt screening; 11128 failures now surface the gateway's own channel-verification tip instead of a bare JSON blob
+
 # v0.5.104 (2026-10-15)
 
 ## Features
