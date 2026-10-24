@@ -21,10 +21,21 @@ function buildTransport(transport, oauth) {
 }
 
 const MEDIA_KEYS = new Set([
-  "serviceKinds", "ttsConfig", "sttConfig", "embeddingConfig",
-  "imageConfig", "imageToTextConfig", "videoConfig", "musicConfig",
-  "searchViaChat", "searchConfig", "fetchConfig", "systemoneConfig",
-  "modelsFetcher", "mediaPriority", "hiddenKinds",
+  "serviceKinds",
+  "ttsConfig",
+  "sttConfig",
+  "embeddingConfig",
+  "imageConfig",
+  "imageToTextConfig",
+  "videoConfig",
+  "musicConfig",
+  "searchViaChat",
+  "searchConfig",
+  "fetchConfig",
+  "systemoneConfig",
+  "modelsFetcher",
+  "mediaPriority",
+  "hiddenKinds",
 ]);
 
 export const PROVIDERS = {};
@@ -36,7 +47,13 @@ for (const entry of REGISTRY) {
     PROVIDERS[entry.id] = buildTransport(entry.transport, entry.oauth);
     if (entry.transports) PROVIDERS[entry.id].transports = entry.transports;
   }
-  if (entry.models !== undefined) PROVIDER_MODELS[entry.alias || entry.id] = entry.models.map(normalizeModel);
+  if (entry.models !== undefined) {
+    const models = entry.models.map(normalizeModel);
+    PROVIDER_MODELS[entry.alias || entry.id] = models;
+    if (entry.id && !PROVIDER_MODELS[entry.id]) {
+      PROVIDER_MODELS[entry.id] = models;
+    }
+  }
   if (entry.oauth) PROVIDER_OAUTH[entry.id] = entry.oauth;
   // Build PROVIDER_MEDIA from top-level fields (post-migration) + legacy entry.media
   const mediaFields = {};
