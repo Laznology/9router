@@ -17,6 +17,48 @@ services:
       PORT: "20128"
       HOSTNAME: "0.0.0.0"
       NODE_ENV: production
-      # Same value the previous container ran with; backend has no stored hash
-      # yet, so dropping it would lock remote dashboard logins.
+      # Seed password only. The database already has a stored password hash,
+      # so this value does not change the current dashboard login.
       INITIAL_PASSWORD: "123456"
+      # Sidecar URL. Only used as the default when settings has no headroomUrl;
+      # a value saved in the dashboard still wins.
+      HEADROOM_URL: http://headroom:8787
+    depends_on:
+      - headroom
+
+  headroom:
+    # Upstream image. The old ghcr.io/chopratejas/headroom repo now redirects
+    # to headroomlabs-ai, so use the canonical path.
+    image: ghcr.io/headroomlabs-ai/headroom:latest
+    container_name: headroom
+    restart: always
+    # Required: the image defaults to 127.0.0.1 inside the container, which
+    # the 9router container cannot reach over the compose network.
+    command: ["--host", "0.0.0.0"]
+    environment:
+      HEADROOM_HOST: "0.0.0.0"
+      HOME: /home/nonroot
+      HEADROOM_WORKSPACE_DIR: /home/nonroot/.headroom
+      HEADROOM_CONFIG_DIR: /home/nonroot/.headroom/config
+      # No HEADROOM_PROXY_TOKEN: 9Router does not send a proxy auth header.
+      # The container still must bind 0.0.0.0 so 9router can reach it, so we
+      # acknowledge that explicit open bind. It stays private because the host
+      # port is loopback-only and only compose services share its network.
+      HEADROOM_ALLOW_UNAUTHENTICATED_BIND: "1"
+      # /v1/compress is loopback-only by default and returns 404 to peer
+      # containers. This is Headroom's documented opt-in for a trusted
+      # in-network sidecar; it only relaxes that one route.
+      HEADROOM_COMPRESS_ALLOW_REMOTE: "1"
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - headroom_data:/home/nonroot/.headroom
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://127.0.0.1:8787/readyz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  headroom_data:

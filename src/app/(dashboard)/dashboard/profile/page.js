@@ -26,6 +26,7 @@ export default function ProfilePage() {
   const [shutdownOpen, setShutdownOpen] = useState(false);
   const [isShuttingDown, setIsShuttingDown] = useState(false);
   const [settings, setSettings] = useState({ fallbackStrategy: "fill-first" });
+  const [maxPayloadKb, setMaxPayloadKb] = useState("5");
   const [loading, setLoading] = useState(true);
   const [passwords, setPasswords] = useState({ current: "", new: "", confirm: "" });
   const [passStatus, setPassStatus] = useState({ type: "", message: "" });
@@ -92,6 +93,7 @@ export default function ProfilePage() {
       .then((res) => res.json())
       .then((data) => {
         setSettings(data);
+        setMaxPayloadKb(String(data?.observabilityMaxJsonSize ?? 5));
         setOidcForm({
           authMode: data?.authMode || "password",
           oidcIssuerUrl: data?.oidcIssuerUrl || "",
@@ -646,6 +648,38 @@ export default function ProfilePage() {
       }
     } catch (err) {
       console.error("Failed to update enableObservability:", err);
+    }
+  };
+
+  const updateObservabilityShowPayloads = async (enabled) => {
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ observabilityShowPayloads: enabled }),
+      });
+      if (res.ok) {
+        setSettings(prev => ({ ...prev, observabilityShowPayloads: enabled }));
+      }
+    } catch (err) {
+      console.error("Failed to update observabilityShowPayloads:", err);
+    }
+  };
+
+  const updateObservabilityMaxJsonSize = async () => {
+    const size = Math.min(1024, Math.max(1, parseInt(maxPayloadKb, 10) || 5));
+    setMaxPayloadKb(String(size));
+    try {
+      const res = await fetch("/api/settings", {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ observabilityMaxJsonSize: size }),
+      });
+      if (res.ok) {
+        setSettings(prev => ({ ...prev, observabilityMaxJsonSize: size }));
+      }
+    } catch (err) {
+      console.error("Failed to update observabilityMaxJsonSize:", err);
     }
   };
 
@@ -1618,6 +1652,39 @@ export default function ProfilePage() {
               onChange={updateObservabilityEnabled}
               disabled={loading}
             />
+          </div>
+
+          <div className="mt-5 space-y-5 border-t border-border/50 pt-5">
+            <div className="flex items-start sm:items-center justify-between gap-4">
+              <div className="flex-1 min-w-0">
+                <p className="font-medium text-sm sm:text-base">Show Raw Payloads</p>
+                <p className="text-xs sm:text-sm text-text-muted">
+                  Return full client/provider request and response bodies in Request Details.
+                </p>
+                <p className="text-xs text-amber-600 dark:text-amber-400">
+                  Payloads can contain prompts, tool output, and secrets. Only enable this when the dashboard is trusted.
+                </p>
+              </div>
+              <Toggle
+                checked={settings.observabilityShowPayloads === true}
+                onChange={updateObservabilityShowPayloads}
+                disabled={loading}
+              />
+            </div>
+
+            <div className="max-w-xs">
+              <Input
+                label="Max JSON Size (KB)"
+                type="number"
+                min="1"
+                max="1024"
+                value={maxPayloadKb}
+                onChange={(e) => setMaxPayloadKb(e.target.value)}
+                onBlur={updateObservabilityMaxJsonSize}
+                disabled={loading}
+                hint="Per-field limit for newly stored request/response JSON. Existing rows are unchanged."
+              />
+            </div>
           </div>
         </Card>
 

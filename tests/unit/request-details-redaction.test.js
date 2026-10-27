@@ -1,18 +1,5 @@
 import { describe, it, expect } from "vitest";
-
-// Mirror the redaction logic from src/app/api/usage/request-details/route.js
-// so we can test it in isolation.
-function redactDetails(details) {
-  return (details || []).map((d) => {
-    const redacted = { ...d };
-    for (const key of ["request", "providerRequest", "providerResponse", "response"]) {
-      if (redacted[key] !== undefined) {
-        redacted[key] = { redacted: true };
-      }
-    }
-    return redacted;
-  });
-}
+import { redactRequestDetails } from "@/lib/requestDetailsPayload";
 
 describe("request-details redaction", () => {
   it("removes conversation payloads but keeps metadata", () => {
@@ -28,7 +15,7 @@ describe("request-details redaction", () => {
       providerResponse: { choices: [{ message: { content: "secret answer" } }] },
       response: { content: "secret answer" },
     }];
-    const out = redactDetails(details)[0];
+    const out = redactRequestDetails(details)[0];
     expect(out.id).toBe("abc");
     expect(out.provider).toBe("opencode");
     expect(out.model).toBe("deepseek-v4-flash-free");
@@ -40,13 +27,13 @@ describe("request-details redaction", () => {
   });
 
   it("handles empty details", () => {
-    expect(redactDetails([])).toEqual([]);
-    expect(redactDetails(null)).toEqual([]);
+    expect(redactRequestDetails([])).toEqual([]);
+    expect(redactRequestDetails(null)).toEqual([]);
   });
 
   it("keeps non-sensitive fields untouched", () => {
     const details = [{ id: "x", status: "error", latency: { total: 100 } }];
-    const out = redactDetails(details)[0];
+    const out = redactRequestDetails(details)[0];
     expect(out.id).toBe("x");
     expect(out.status).toBe("error");
     expect(out.latency).toEqual({ total: 100 });

@@ -11,7 +11,6 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
 import { getWritableDataDir } from "../utils/writableDataDir.js";
 
@@ -46,6 +45,22 @@ function npmInstall(pkg, version) {
 
 const inflight = new Map();
 
+// Webpack rewrites both createRequire() and non-literal import() calls in
+// server bundles: createRequire becomes a stub whose resolve always throws and
+// the import becomes a context module that cannot load an absolute file URL.
+// Load node:module with webpackIgnore so the real Node implementation survives
+// bundling, and do the same for every import of a resolved runtime path.
+let nodeCreateRequire;
+
+async function importFromRuntime(pkg) {
+  if (!nodeCreateRequire) {
+    ({ createRequire: nodeCreateRequire } = await import(/* webpackIgnore: true */ "node:module"));
+  }
+  const runtimeRequire = nodeCreateRequire(path.join(getRuntimeDir(), "package.json"));
+  const resolved = runtimeRequire.resolve(pkg);
+  return import(/* webpackIgnore: true */ pathToFileURL(resolved).href);
+}
+
 async function load(pkg) {
   // 1) Resolvable from the app install (dev machine / traced standalone).
   try {
@@ -54,9 +69,8 @@ async function load(pkg) {
     if (!isModuleMissing(error)) throw error;
   }
   // 2) Already present in the runtime dir from a previous install.
-  const runtimeRequire = createRequire(path.join(getRuntimeDir(), "package.json"));
   try {
-    return await import(pathToFileURL(runtimeRequire.resolve(pkg)).href);
+    return await importFromRuntime(pkg);
   } catch (error) {
     if (!isModuleMissing(error)) throw error;
   }
@@ -71,7 +85,7 @@ async function load(pkg) {
       `install it manually: cd "${dir}" && npm install ${pkg}@${version}`
     );
   }
-  return import(pathToFileURL(createRequire(path.join(dir, "package.json")).resolve(pkg)).href);
+  return importFromRuntime(pkg);
 }
 
 export function loadRuntimeDep(pkg) {

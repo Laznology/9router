@@ -66,7 +66,7 @@ docker run -d \
 
 ## Optional Headroom sidecar
 
-The 9Router image does not bundle Python or Headroom. To use Headroom in Docker, run it as a separate service and point 9Router at that proxy:
+The 9Router image does not bundle Python or Headroom. To use Headroom in Docker, run the official image as a separate service and point 9Router at that proxy:
 
 ```yaml
 services:
@@ -83,14 +83,31 @@ services:
       - headroom
 
   headroom:
-    image: ghcr.io/chopratejas/headroom:latest
+    image: ghcr.io/headroomlabs-ai/headroom:latest
+    restart: always
+    # The image binds 127.0.0.1 inside the container by default.
+    command: ["--host", "0.0.0.0"]
+    environment:
+      # Acknowledge the 0.0.0.0 bind. Safe here because the host port is
+      # loopback-only and the compose network is private.
+      HEADROOM_ALLOW_UNAUTHENTICATED_BIND: "1"
+      # /v1/compress is loopback-only by default and returns 404 to peer
+      # containers. This is Headroom's opt-in for a trusted in-network sidecar.
+      HEADROOM_COMPRESS_ALLOW_REMOTE: "1"
     ports:
-      - "8787:8787"
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - headroom_data:/home/nonroot/.headroom
+
+volumes:
+  headroom_data:
 ```
+
+Do not publish `8787` on `0.0.0.0` without `HEADROOM_PROXY_TOKEN`: 9Router does not send a proxy auth header, so the token would break compression, and an open port relays requests with your upstream credentials.
 
 In the dashboard, open `Endpoint` → `Token Saver` → `Headroom`, confirm the URL is `http://headroom:8787`, recheck status, then enable Headroom.
 
-If Headroom runs on the Docker host instead of as a sidecar, use `http://host.docker.internal:8787` on macOS/Windows. On Linux, add `--add-host=host.docker.internal:host-gateway` or the equivalent compose `extra_hosts` entry.
+If Headroom runs on the Docker host instead of as a sidecar, use `http://host.docker.internal:8787` on macOS/Windows. On Linux, add `--add-host=host.docker.internal:host-gateway` or the equivalent compose `extra_hosts` entry. The host process must also bind a reachable interface (`headroom proxy --host 0.0.0.0`) and set `HEADROOM_COMPRESS_ALLOW_REMOTE=1`; keep it behind a firewall.
 
 ## Update to latest
 

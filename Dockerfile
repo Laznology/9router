@@ -67,6 +67,11 @@ COPY --from=builder /app/node_modules/next ./node_modules/next
 COPY --from=builder /app/node_modules/sql.js ./node_modules/sql.js
 # node-machine-id is createRequire-loaded at runtime; tracing omits it.
 COPY --from=builder /app/node_modules/node-machine-id ./node_modules/node-machine-id
+# wreq-js powers OpenCode/Grok free-tier TLS impersonation. It is a devDependency
+# (npm users get it via runtime on-demand install), so standalone tracing omits it.
+# Ship it in the Docker image so the first free-tier request has no install delay.
+COPY --from=builder /app/node_modules/wreq-js ./node_modules/wreq-js
+COPY --from=builder /app/node_modules/@wreq-js ./node_modules/@wreq-js
 
 RUN mkdir -p /app/data && chown -R node:node /app && \
   mkdir -p /app/data-home && chown node:node /app/data-home && \

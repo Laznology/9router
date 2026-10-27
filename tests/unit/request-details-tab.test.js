@@ -30,7 +30,8 @@ beforeAll(async () => {
   adapter = await getAdapter();
 });
 
-afterAll(() => {
+afterAll(async () => {
+  if (db) await db.updateSettings({ observabilityShowPayloads: false }).catch(() => {});
   if (tempDir) fs.rmSync(tempDir, { recursive: true, force: true });
   if (originalDataDir === undefined) delete process.env.DATA_DIR;
   else process.env.DATA_DIR = originalDataDir;
@@ -114,10 +115,17 @@ describe("request details — tab crash-risk cases", () => {
 // Mirror of RequestDetailsTab token helpers (component is "use client",
 // helpers are not exported). Keep in sync with the component.
 function getCachedTokens(tokens) {
-  return tokens?.cached_tokens || tokens?.cache_read_input_tokens || 0;
+  return tokens?.cached_tokens
+    || tokens?.cache_read_input_tokens
+    || tokens?.prompt_tokens_details?.cached_tokens
+    || tokens?.input_tokens_details?.cached_tokens
+    || 0;
 }
 function getCacheCreationTokens(tokens) {
-  return tokens?.cache_creation_input_tokens || 0;
+  return tokens?.cache_creation_input_tokens
+    || tokens?.prompt_tokens_details?.cache_creation_tokens
+    || tokens?.prompt_tokens_details?.cache_creation_input_tokens
+    || 0;
 }
 function getInputTokens(tokens) {
   const prompt = tokens?.prompt_tokens || tokens?.input_tokens || 0;
@@ -200,6 +208,16 @@ describe("token helpers — render-time crash safety", () => {
     expect(getCachedTokens({ cache_read_input_tokens: 42 })).toBe(42);
   });
 
+  it("cached via nested OpenAI/Responses detail shapes (legacy rows)", () => {
+    expect(getCachedTokens({ prompt_tokens_details: { cached_tokens: 240 } })).toBe(240);
+    expect(getCachedTokens({ input_tokens_details: { cached_tokens: 320 } })).toBe(320);
+  });
+
+  it("cache creation via nested detail shape (legacy rows)", () => {
+    expect(getCacheCreationTokens({ prompt_tokens_details: { cache_creation_tokens: 80 } })).toBe(80);
+    expect(getCacheCreationTokens({ prompt_tokens_details: { cache_creation_input_tokens: 90 } })).toBe(90);
+  });
+
   it("toLocaleString on helper result never throws", () => {
     expect(() => getInputTokens(undefined).toLocaleString()).not.toThrow();
   });
@@ -250,5 +268,50 @@ describe("API route contract — validation boundary", () => {
     const body = await res.json();
     expect(Array.isArray(body.details)).toBe(true);
     expect(body.pagination).toMatchObject({ page: 1, pageSize: 20 });
+  });
+
+  it("redacts payloads by default", async () => {
+    await db.updateSettings({ observabilityShowPayloads: false });
+    await saveDetail({
+      id: "redact-default", provider: "openai", model: "m", status: "ok",
+      tokens: { prompt_tokens: 10, completion_tokens: 5 },
+      request: { messages: [{ role: "user", content: "secret prompt" }] },
+      providerRequest: { messages: [{ role: "user", content: "secret prompt" }] },
+      providerResponse: { choices: [{ message: { content: "secret answer" } }] },
+      response: { content: "secret answer" },
+    });
+
+    const res = await GET(makeReq("page=1&pageSize=100"));
+    const body = await res.json();
+    const detail = body.details.find((d) => d.id === "redact-default");
+
+    expect(detail.tokens).toEqual({ prompt_tokens: 10, completion_tokens: 5 });
+    expect(detail.request).toEqual({ redacted: true });
+    expect(detail.providerRequest).toEqual({ redacted: true });
+    expect(detail.providerResponse).toEqual({ redacted: true });
+    expect(detail.response).toEqual({ redacted: true });
+  });
+
+  it("returns raw payloads when the opt-in setting is enabled", async () => {
+    await db.updateSettings({ observabilityShowPayloads: true });
+    await saveDetail({
+      id: "redact-enabled", provider: "openai", model: "m", status: "ok",
+      tokens: { prompt_tokens: 10, completion_tokens: 5 },
+      request: { messages: [{ role: "user", content: "visible prompt" }] },
+      providerRequest: { messages: [{ role: "user", content: "visible prompt" }] },
+      providerResponse: { choices: [{ message: { content: "visible answer" } }] },
+      response: { content: "visible answer" },
+    });
+
+    const res = await GET(makeReq("page=1&pageSize=100"));
+    const body = await res.json();
+    const detail = body.details.find((d) => d.id === "redact-enabled");
+
+    expect(detail.request.messages[0].content).toBe("visible prompt");
+    expect(detail.providerRequest.messages[0].content).toBe("visible prompt");
+    expect(detail.providerResponse.choices[0].message.content).toBe("visible answer");
+    expect(detail.response.content).toBe("visible answer");
+
+    await db.updateSettings({ observabilityShowPayloads: false });
   });
 });

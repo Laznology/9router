@@ -215,17 +215,24 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
       if (log?.line) log.line(reqTag, "📊", formatDoneLine({ usage, latency: { total: Date.now() - requestStartTime } }));
 
       // Same cache-inclusive total for the recorded detail, so the DB and the
-      // client-facing usage can never disagree.
-      const inTokensForLog = (usage.input_tokens || 0)
-        + (usage.cache_read_input_tokens || usage.cached_tokens || 0)
-        + (usage.cache_creation_input_tokens || 0);
+      // client-facing usage can never disagree. Keep the cache breakdown too:
+      // without it Request Details showed "-" while Usage counted the cache.
+      const cacheRead = usage.cache_read_input_tokens || usage.cached_tokens || 0;
+      const cacheCreate = usage.cache_creation_input_tokens || 0;
+      const inTokensForLog = (usage.input_tokens || 0) + cacheRead + cacheCreate;
       const { msgItem, textContent } = pickAssistantMessageForChatCompletion(jsonResponse.output);
       const totalLatency = Date.now() - requestStartTime;
 
       saveRequestDetail(buildRequestDetail({
         ...ctx,
         latency: { ttft: totalLatency, total: totalLatency },
-        tokens: { prompt_tokens: inTokensForLog, completion_tokens: usage.output_tokens || 0 },
+        tokens: {
+          prompt_tokens: inTokensForLog,
+          completion_tokens: usage.output_tokens || 0,
+          cached_tokens: cacheRead,
+          cache_creation_input_tokens: cacheCreate
+        },
+        providerResponse: jsonResponse,
         response: { content: textContent, thinking: null, finish_reason: jsonResponse.status || "unknown" },
         status: "success"
       }, { endpoint: clientRawRequest?.endpoint || null })).catch(() => {});
@@ -241,9 +248,7 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
       // where the real prompt was ~5344 with 5332 served from cache. Fold the cache
       // counters in, and keep them visible in prompt_tokens_details so a client can
       // tell a cache hit from a small prompt.
-      const cacheRead = usage.cache_read_input_tokens || usage.cached_tokens || 0;
-      const cacheCreate = usage.cache_creation_input_tokens || 0;
-      const inTokens = (usage.input_tokens || 0) + cacheRead + cacheCreate;
+      const inTokens = inTokensForLog;
       const outTokens = usage.output_tokens || 0;
       const cacheDetails = (cacheRead > 0 || cacheCreate > 0)
         ? { prompt_tokens_details: {
@@ -331,6 +336,7 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
       ...ctx,
       latency: { ttft: totalLatency, total: totalLatency },
       tokens: usage,
+      providerResponse: parsed,
       response: {
         content: parsed.choices?.[0]?.message?.content || null,
         thinking: parsed.choices?.[0]?.message?.reasoning_content || null,

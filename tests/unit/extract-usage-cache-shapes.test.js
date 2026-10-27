@@ -12,7 +12,7 @@ vi.mock("../../open-sse/utils/stream.js", () => ({
   formatSSE: vi.fn(),
 }));
 
-import { extractUsageFromResponse } from "../../open-sse/handlers/chatCore/requestDetail.js";
+import { buildRequestDetail, extractUsageFromResponse } from "../../open-sse/handlers/chatCore/requestDetail.js";
 import { canonicalizeUsage } from "../../open-sse/utils/usageTracking.js";
 
 // The three real-world usage shapes and how extractUsageFromResponse() must
@@ -110,5 +110,52 @@ describe("extractUsageFromResponse cache surfaces", () => {
     // Non-final Ollama chunk (done:false) carries no usage — must not match.
     expect(extractUsageFromResponse({ model: "x", done: false, prompt_eval_count: 5 }))
       .toBeNull();
+  });
+});
+
+describe("buildRequestDetail token normalization", () => {
+  it("stores nested OpenAI cache reads in the same shape as Usage", () => {
+    const detail = buildRequestDetail({
+      provider: "opencode",
+      model: "deepseek-v4.1-flash-free",
+      tokens: {
+        prompt_tokens: 12492,
+        completion_tokens: 3,
+        prompt_tokens_details: { cached_tokens: 1536 },
+      },
+    });
+
+    expect(detail.tokens).toMatchObject({
+      prompt_tokens: 12492,
+      completion_tokens: 3,
+      total_tokens: 12495,
+      cached_tokens: 1536,
+      cache_creation_input_tokens: 0,
+    });
+  });
+
+  it("folds Claude cache-exclusive prompt before storing the detail", () => {
+    const detail = buildRequestDetail({
+      provider: "anthropic",
+      model: "claude",
+      tokens: {
+        input_tokens: 100,
+        output_tokens: 50,
+        cache_read_input_tokens: 200,
+        cache_creation_input_tokens: 30,
+      },
+    });
+
+    expect(detail.tokens).toMatchObject({
+      prompt_tokens: 330,
+      completion_tokens: 50,
+      cached_tokens: 200,
+      cache_creation_input_tokens: 30,
+    });
+  });
+
+  it("falls back to zero token fields for invalid input", () => {
+    const detail = buildRequestDetail({ provider: "x", model: "y", tokens: null });
+    expect(detail.tokens).toEqual({ prompt_tokens: 0, completion_tokens: 0 });
   });
 });

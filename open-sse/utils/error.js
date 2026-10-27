@@ -70,7 +70,7 @@ export async function parseUpstreamError(response, executor = null) {
       const parsed = executor.parseError(response, bodyText);
       if (parsed && typeof parsed === "object") {
         const msg = parsed.message || DEFAULT_ERROR_MESSAGES[response.status] || `Upstream error: ${response.status}`;
-        return { statusCode: parsed.status || response.status, message: msg, resetsAtMs: parsed.resetsAtMs };
+        return { statusCode: parsed.status || response.status, message: msg, resetsAtMs: parsed.resetsAtMs, rawBody: bodyText };
       }
     } catch { /* fall through to default parsing */ }
   }
@@ -86,7 +86,7 @@ export async function parseUpstreamError(response, executor = null) {
   const messageStr = typeof message === "string" ? message : JSON.stringify(message);
   const finalMessage = messageStr || DEFAULT_ERROR_MESSAGES[response.status] || `Upstream error: ${response.status}`;
 
-  return { statusCode: response.status, message: finalMessage };
+  return { statusCode: response.status, message: finalMessage, rawBody: bodyText };
 }
 
 /**

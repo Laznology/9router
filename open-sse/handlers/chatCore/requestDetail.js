@@ -86,7 +86,11 @@ export function buildRequestDetail(base, overrides = {}) {
     connectionId: base.connectionId || undefined,
     timestamp: new Date().toISOString(),
     latency: base.latency || { ttft: 0, total: 0 },
-    tokens: base.tokens || { prompt_tokens: 0, completion_tokens: 0 },
+    // Store the same canonical token convention as the usage DB, so cache reads
+    // reported by Usage also appear in Request Details. Provider usages arrive
+    // in several shapes (nested prompt_tokens_details, Claude cache_read_*,
+    // Responses input_tokens_details); canonicalizeUsage folds them all.
+    tokens: canonicalizeUsage(base.tokens) || { prompt_tokens: 0, completion_tokens: 0 },
     request: base.request,
     providerRequest: base.providerRequest || null,
     providerResponse: base.providerResponse || null,
