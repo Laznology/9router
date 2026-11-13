@@ -20,13 +20,50 @@
 import os from "node:os";
 import path from "node:path";
 
-import {
-  OPENCODE_FINGERPRINT_TOOL_DEFINITIONS as FINGERPRINT_TOOL_DEFINITIONS,
-  OPENCODE_FINGERPRINT_TOOLS,
-  OPENCODE_AGENT_SYSTEM,
-} from "../config/opencodeFingerprintData.js";
+/** Names required by the upstream free-tier gate. */
+export const OPENCODE_FINGERPRINT_TOOLS = ["read", "shell"];
 
-export { OPENCODE_FINGERPRINT_TOOLS };
+// A second, purely textual gate on the same route: a declared tool name
+// containing "terminal" (case-insensitive substring) is answered 429
+// FreeUsageLimitError regardless of quota, IP, session or payload size, while
+// the same body with only that name changed answers normally
+// (decolua/9router#5319). Only `tools[]` is inspected — history and system
+// prompt are not — so the declaration travels under an alias and the caller's
+// name is restored on the way back, like a fingerprint-name collision.
+export const GATED_TOOL_NAME_RE = /terminal/i;
+const GATED_TOOL_ALIAS = "run_command";
+
+// Verbatim from the OpenCode v2.0.26 CLI. Upstream compares description and
+// parameters, so do not reword or reformat these.
+const FINGERPRINT_TOOL_DEFINITIONS = {
+  read: {
+    description: "Read the contents of a file or directory. Supports text files, images, and PDFs. Images and PDFs are presented directly to the model. Each text line is prefixed by its 1-based line number as <line>: <content>. The prefix is for reference and is not part of the file content. Directory entries are returned one per line. Use offset and limit to read large files or directories in sections. Prefer one larger read over many small slices, and use grep to find specific content in large files.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "File or directory to read" },
+        offset: { type: "integer", minimum: 0, description: "The line or directory entry to start reading from (1-based)" },
+        limit: { type: "integer", minimum: 0, description: "The maximum number of lines or directory entries to read (defaults to and capped at 2000)" },
+      },
+      required: ["path"],
+      additionalProperties: false,
+    },
+  },
+  shell: {
+    description: "Execute a shell command and return its output. Commands run on Linux using bash. Quote file paths containing spaces or special characters. Prefer dedicated tools over shell commands when possible. When output is large, the full result is saved to a file and a truncated preview is returned. Rely on automatic truncation unless filtering the output is more useful. Commands accept an optional timeout, background commands have no timeout by default. Background commands return immediately, and you will be notified when they complete.",
+    parameters: {
+      type: "object",
+      properties: {
+        command: { type: "string", description: "Shell command string to execute" },
+        workdir: { type: "string", description: "Working directory to execute the command in. Defaults to the current working directory. When possible, avoid changing directories in the command and set the working directory here instead." },
+        timeout: { type: "integer", minimum: 0, description: "Timeout in milliseconds. Set to 0 to disable the timeout. Defaults to 120000 for foreground commands. Background commands have no timeout by default." },
+        background: { type: "boolean", description: "Run the command in the background and return immediately (useful for dev servers and long-running builds). You do not need to use '&' at the end of the command when using this parameter. You will be notified when it completes. DO NOT poll for completion." },
+      },
+      required: ["command"],
+      additionalProperties: false,
+    },
+  },
+};
 
 // Request body -> names renamed for that request. transformRequest() mutates the
 // same body object that chatCore passed into the executor, so a WeakMap keeps the
@@ -42,15 +79,9 @@ export function fingerprintToolKey(name) {
 /** Read a tool name from either flat ({name}) or chat ({function:{name}}) shape. */
 function toolNameOf(tool) {
   if (!tool || typeof tool !== "object" || Array.isArray(tool)) return "";
-  if (typeof tool.name === "string" && tool.name.trim())
-    return tool.name.trim();
+  if (typeof tool.name === "string" && tool.name.trim()) return tool.name.trim();
   const fn = tool.function;
-  if (
-    fn &&
-    typeof fn === "object" &&
-    !Array.isArray(fn) &&
-    typeof fn.name === "string"
-  ) {
+  if (fn && typeof fn === "object" && !Array.isArray(fn) && typeof fn.name === "string") {
     return fn.name.trim();
   }
   return "";
@@ -65,11 +96,8 @@ function chatFunctionOf(tool) {
 function isFingerprintDefinition(tool, key) {
   const def = tool && (chatFunctionOf(tool) || tool);
   const want = FINGERPRINT_TOOL_DEFINITIONS[key];
-  return (
-    !!def &&
-    def.description === want.description &&
-    JSON.stringify(def.parameters) === JSON.stringify(want.parameters)
-  );
+  return !!def && def.description === want.description
+    && JSON.stringify(def.parameters) === JSON.stringify(want.parameters);
 }
 
 function withToolName(tool, name) {
@@ -93,14 +121,10 @@ function canNormalizeInPlace(tool, key) {
   const props = def?.parameters?.properties;
   if (!props || typeof props !== "object" || Array.isArray(props)) return false;
 
-  const wanted = Object.keys(
-    FINGERPRINT_TOOL_DEFINITIONS[key].parameters.properties || {},
-  );
+  const wanted = Object.keys(FINGERPRINT_TOOL_DEFINITIONS[key].parameters.properties || {});
   const declared = Object.keys(props);
   if (declared.some((name) => !wanted.includes(name))) return false;
-  return FINGERPRINT_TOOL_DEFINITIONS[key].parameters.required.every((name) =>
-    declared.includes(name),
-  );
+  return FINGERPRINT_TOOL_DEFINITIONS[key].parameters.required.every((name) => declared.includes(name));
 }
 
 /**
@@ -139,7 +163,17 @@ export function concealFingerprintToolNames(tools) {
       continue;
     }
 
-    const key = fingerprintToolKey(toolNameOf(tool));
+    const name = toolNameOf(tool);
+    if (GATED_TOOL_NAME_RE.test(name)) {
+      let alias = GATED_TOOL_ALIAS;
+      for (let i = 2; taken.has(alias); i++) alias = `${GATED_TOOL_ALIAS}${i}`;
+      taken.add(alias);
+      map.set(alias, name);
+      out.push(withToolName(tool, alias));
+      continue;
+    }
+
+    const key = fingerprintToolKey(name);
     if (!key) {
       out.push(tool);
       continue;
@@ -180,14 +214,11 @@ export function appendMissingFingerprintTools(tools, flat) {
   const appended = [];
   if (!Array.isArray(tools)) return appended;
   for (const name of OPENCODE_FINGERPRINT_TOOLS) {
-    if (tools.some((tool) => fingerprintToolKey(toolNameOf(tool)) === name))
-      continue;
+    if (tools.some((tool) => fingerprintToolKey(toolNameOf(tool)) === name)) continue;
     const { description, parameters } = FINGERPRINT_TOOL_DEFINITIONS[name];
-    tools.push(
-      flat
-        ? { type: "function", name, description, parameters, strict: false }
-        : { type: "function", function: { name, description, parameters } },
-    );
+    tools.push(flat
+      ? { type: "function", name, description, parameters, strict: false }
+      : { type: "function", function: { name, description, parameters } });
     appended.push(name);
   }
   return appended;
@@ -212,15 +243,9 @@ export function retargetToolChoice(body, map) {
   }
 
   const fn = choice.function;
-  if (
-    fn &&
-    typeof fn === "object" &&
-    !Array.isArray(fn) &&
-    typeof fn.name === "string"
-  ) {
+  if (fn && typeof fn === "object" && !Array.isArray(fn) && typeof fn.name === "string") {
     const alias = aliases.get(fn.name.trim());
-    if (alias)
-      body.tool_choice = { ...choice, function: { ...fn, name: alias } };
+    if (alias) body.tool_choice = { ...choice, function: { ...fn, name: alias } };
   }
 }
 
@@ -236,8 +261,7 @@ export function aliasHistoryToolCalls(body, map) {
     body.input = body.input.map((item) =>
       item?.type === "function_call" && aliases.has(item.name)
         ? { ...item, name: aliases.get(item.name) }
-        : item,
-    );
+        : item);
   }
 
   if (Array.isArray(body.messages)) {
@@ -247,15 +271,8 @@ export function aliasHistoryToolCalls(body, map) {
         ...msg,
         tool_calls: msg.tool_calls.map((call) =>
           aliases.has(call?.function?.name)
-            ? {
-                ...call,
-                function: {
-                  ...call.function,
-                  name: aliases.get(call.function.name),
-                },
-              }
-            : call,
-        ),
+            ? { ...call, function: { ...call.function, name: aliases.get(call.function.name) } }
+            : call),
       };
     });
   }
@@ -268,15 +285,13 @@ export function aliasHistoryToolCalls(body, map) {
 // Read/Bash; "placeholders ... use the other tools" kept those working.
 function noteUnavailableTools(body, flat, names, claude = false) {
   const list = names.map((name) => `\`${name}\``).join(" or ");
-  const note =
-    names.length > 1
-      ? `Do not call the ${list} tools; they are placeholders that do nothing. Use the other tools you have been given instead.`
-      : `Do not call the ${list} tool; it is a placeholder that does nothing. Use the other tools you have been given instead.`;
+  const note = names.length > 1
+    ? `Do not call the ${list} tools; they are placeholders that do nothing. Use the other tools you have been given instead.`
+    : `Do not call the ${list} tool; it is a placeholder that does nothing. Use the other tools you have been given instead.`;
   if (flat) {
-    body.instructions =
-      typeof body.instructions === "string" && body.instructions.trim()
-        ? `${body.instructions}\n\n${note}`
-        : note;
+    body.instructions = typeof body.instructions === "string" && body.instructions.trim()
+      ? `${body.instructions}\n\n${note}`
+      : note;
     return;
   }
   // Claude-shaped bodies carry `system` instead; /messages rejects role:"system".
@@ -287,10 +302,7 @@ function noteUnavailableTools(body, flat, names, claude = false) {
   if (!Array.isArray(body.messages)) return;
   const first = body.messages[0];
   if (first?.role === "system" && typeof first.content === "string") {
-    body.messages = [
-      { ...first, content: `${first.content}\n\n${note}` },
-      ...body.messages.slice(1),
-    ];
+    body.messages = [{ ...first, content: `${first.content}\n\n${note}` }, ...body.messages.slice(1)];
   } else {
     body.messages = [{ role: "system", content: note }, ...body.messages];
   }
@@ -300,8 +312,7 @@ function noteUnavailableTools(body, flat, names, claude = false) {
 // passes, so the marker is appended to the caller's own prompt rather than
 // replacing it. Values mirror a real CLI instance on this host.
 const ENV_TAG = "<env>";
-const ENV_HEADING =
-  "Here is some useful information about the environment you are running in:";
+const ENV_HEADING = "Here is some useful information about the environment you are running in:";
 const ENV_TMP_DIR = path.join(os.tmpdir(), "opencode");
 const ENV_WORKING_DIR = process.cwd();
 const ENV_FINGERPRINT_PROMPT = [
@@ -319,10 +330,7 @@ const ENV_FINGERPRINT_PROMPT = [
 function systemCarriesEnv(system) {
   if (typeof system === "string") return system.includes(ENV_TAG);
   if (Array.isArray(system)) {
-    return system.some(
-      (block) =>
-        typeof block?.text === "string" && block.text.includes(ENV_TAG),
-    );
+    return system.some((block) => typeof block?.text === "string" && block.text.includes(ENV_TAG));
   }
   return false;
 }
@@ -337,10 +345,7 @@ function appendSystemText(system, text) {
     const block = blocks[i];
     if (typeof block?.text === "string") {
       const existing = block.text.trim();
-      blocks[i] = {
-        ...block,
-        text: existing ? `${block.text}\n\n${text}` : text,
-      };
+      blocks[i] = { ...block, text: existing ? `${block.text}\n\n${text}` : text };
       return blocks;
     }
   }
@@ -364,16 +369,11 @@ export function applyEnvFingerprint(body, flat, { claude = false } = {}) {
     if (!body || typeof body !== "object") return false;
 
     if (flat) {
-      if (
-        body.instructions !== undefined &&
-        typeof body.instructions !== "string"
-      )
-        return false;
+      if (body.instructions !== undefined && typeof body.instructions !== "string") return false;
       if (systemCarriesEnv(body.instructions)) return false;
-      body.instructions =
-        typeof body.instructions === "string" && body.instructions.trim()
-          ? `${body.instructions}\n\n${ENV_FINGERPRINT_PROMPT}`
-          : ENV_FINGERPRINT_PROMPT;
+      body.instructions = (typeof body.instructions === "string" && body.instructions.trim())
+        ? `${body.instructions}\n\n${ENV_FINGERPRINT_PROMPT}`
+        : ENV_FINGERPRINT_PROMPT;
       return true;
     }
 
@@ -389,15 +389,10 @@ export function applyEnvFingerprint(body, flat, { claude = false } = {}) {
       const target = body.messages[idx];
       if (systemCarriesEnv(target.content)) return false;
       const content = appendSystemText(target.content, ENV_FINGERPRINT_PROMPT);
-      body.messages = body.messages.map((msg, i) =>
-        i === idx ? { ...msg, content } : msg,
-      );
+      body.messages = body.messages.map((msg, i) => (i === idx ? { ...msg, content } : msg));
       return true;
     }
-    body.messages = [
-      { role: "system", content: ENV_FINGERPRINT_PROMPT },
-      ...body.messages,
-    ];
+    body.messages = [{ role: "system", content: ENV_FINGERPRINT_PROMPT }, ...body.messages];
     return true;
   } catch {
     return false;
@@ -446,63 +441,12 @@ export function takeRenamedToolNames(body) {
   return renamedToolNames.get(body) || null;
 }
 
-// Content appended after the canonical preamble. Appends are accepted by the
-// free-tier gate; the preamble itself must stay verbatim.
-const SYSTEM_CLOAK_SEP = "\n\n# Custom rules\n";
-
-/**
- * Make the request pass the free-tier system-prompt gate: messages[0] must
- * start with OpenCode's canonical preamble. The caller's own system text
- * rides after it under "# Custom rules" so it still reaches the model.
- *
- * Idempotent. Runs AFTER applyFingerprintTools, so the placeholder-note system
- * message that function may prepend gets folded into the cloaked first
- * message instead of landing before the preamble. Guarded: unknown shapes are
- * left untouched rather than corrupting the request.
- *
- * @param {object} body - OpenAI chat-shaped request body, mutated in place
- */
-export function cloakOpencodeSystem(body) {
-  if (
-    !body ||
-    typeof body !== "object" ||
-    !Array.isArray(body.messages) ||
-    body.messages.length === 0
-  ) {
-    return;
-  }
-  const first = body.messages[0];
-  if (first?.role !== "system") {
-    body.messages = [
-      { role: "system", content: OPENCODE_AGENT_SYSTEM },
-      ...body.messages,
-    ];
-    return;
-  }
-  if (typeof first.content === "string") {
-    if (first.content.startsWith(OPENCODE_AGENT_SYSTEM)) return;
-    first.content = `${OPENCODE_AGENT_SYSTEM}${SYSTEM_CLOAK_SEP}${first.content}`;
-    return;
-  }
-  if (Array.isArray(first.content)) {
-    // Multi-part system text (rare): the preamble must be the first part.
-    const placeholder = {
-      type: "text",
-      text: OPENCODE_AGENT_SYSTEM + SYSTEM_CLOAK_SEP,
-    };
-    first.content = [placeholder, ...first.content];
-  }
-}
-
-export { OPENCODE_AGENT_SYSTEM };
-
 // Response side -------------------------------------------------------------
 
 /** Restore caller tool spellings in supported response/event shapes. */
 export function restoreToolNames(payload, map) {
   if (!map?.size || !payload) return payload;
-  if (Array.isArray(payload))
-    return payload.map((item) => restoreToolNames(item, map));
+  if (Array.isArray(payload)) return payload.map((item) => restoreToolNames(item, map));
   if (typeof payload !== "object") return payload;
 
   let out = payload;
@@ -514,83 +458,52 @@ export function restoreToolNames(payload, map) {
   // Claude streaming content_block_start event.
   if (payload.type === "content_block_start") {
     const block = payload.content_block;
-    if (
-      block?.type === "tool_use" &&
-      typeof block.name === "string" &&
-      map.has(block.name)
-    ) {
+    if (block?.type === "tool_use" && typeof block.name === "string" && map.has(block.name)) {
       put("content_block", { ...block, name: map.get(block.name) });
     }
   }
 
   // Claude non-streaming message body.
   if (Array.isArray(payload.content)) {
-    put(
-      "content",
-      payload.content.map((block) =>
-        block?.type === "tool_use" &&
-        typeof block.name === "string" &&
-        map.has(block.name)
-          ? { ...block, name: map.get(block.name) }
-          : block,
-      ),
-    );
+    put("content", payload.content.map((block) =>
+      block?.type === "tool_use" && typeof block.name === "string" && map.has(block.name)
+        ? { ...block, name: map.get(block.name) }
+        : block));
   }
 
   // OpenAI Chat Completions, both streaming delta and JSON message shapes.
   if (Array.isArray(payload.choices)) {
-    put(
-      "choices",
-      payload.choices.map((choice) => {
-        let changed = false;
-        const next = { ...choice };
-        for (const holder of ["delta", "message"]) {
-          const value = choice?.[holder];
-          if (
-            !value ||
-            !Array.isArray(value.tool_calls) ||
-            value.tool_calls.length === 0
-          )
-            continue;
-          const calls = value.tool_calls.map((call) => {
-            const name = call?.function?.name;
-            if (typeof name === "string" && map.has(name)) {
-              changed = true;
-              return {
-                ...call,
-                function: { ...call.function, name: map.get(name) },
-              };
-            }
-            return call;
-          });
-          next[holder] = { ...value, tool_calls: calls };
-        }
-        return changed ? next : choice;
-      }),
-    );
+    put("choices", payload.choices.map((choice) => {
+      let changed = false;
+      const next = { ...choice };
+      for (const holder of ["delta", "message"]) {
+        const value = choice?.[holder];
+        if (!value || !Array.isArray(value.tool_calls) || value.tool_calls.length === 0) continue;
+        const calls = value.tool_calls.map((call) => {
+          const name = call?.function?.name;
+          if (typeof name === "string" && map.has(name)) {
+            changed = true;
+            return { ...call, function: { ...call.function, name: map.get(name) } };
+          }
+          return call;
+        });
+        next[holder] = { ...value, tool_calls: calls };
+      }
+      return changed ? next : choice;
+    }));
   }
 
   // OpenAI Responses final JSON body.
   if (Array.isArray(payload.output)) {
-    put(
-      "output",
-      payload.output.map((item) =>
-        item?.type === "function_call" &&
-        typeof item.name === "string" &&
-        map.has(item.name)
-          ? { ...item, name: map.get(item.name) }
-          : item,
-      ),
-    );
+    put("output", payload.output.map((item) =>
+      item?.type === "function_call" && typeof item.name === "string" && map.has(item.name)
+        ? { ...item, name: map.get(item.name) }
+        : item));
   }
 
   // OpenAI Responses SSE events such as response.output_item.added/done.
   const item = payload.item;
-  if (
-    item?.type === "function_call" &&
-    typeof item.name === "string" &&
-    map.has(item.name)
-  ) {
+  if (item?.type === "function_call" && typeof item.name === "string" && map.has(item.name)) {
     put("item", { ...item, name: map.get(item.name) });
   }
 
